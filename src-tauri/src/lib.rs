@@ -47,6 +47,16 @@ struct BackendLog {
 
 struct AppState {
     running: Arc<AtomicBool>,
+    keep_awake: Arc<AtomicBool>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
+struct SystemCheckResult {
+    screen_timeout: Option<u32>,      // minutes, None = Never
+    screensaver_enabled: bool,
+    screensaver_secured: bool,
+    sleep_timeout: Option<u32>,       // minutes, None = Never
+    warnings: Vec<String>,
 }
 
 #[tauri::command]
@@ -115,6 +125,142 @@ fn test_click_here() -> Result<String, String> {
         .map_err(|e| format!("Release失败: {:?}", e))?;
     
     Ok(format!("测试点击成功 at ({}, {})", x, y))
+}
+
+#[tauri::command]
+fn check_system_settings() -> SystemCheckResult {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Registry::{RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_VALUE_TYPE};
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::ERROR_SUCCESS;
+
+        let mut warnings = Vec::new();
+        let mut screen_timeout = None;
+        let mut screensaver_enabled = false;
+        let mut screensaver_secured = false;
+        let sleep_timeout = None;
+
+        unsafe {
+            // Check screen timeout
+            let desktop_key = "Control Panel\\Desktop\0".encode_utf16().collect::<Vec<u16>>();
+            let mut hkey: HKEY = HKEY::default();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(desktop_key.as_ptr()), 0, KEY_READ, &mut hkey) == ERROR_SUCCESS {
+                // Check screensaver
+                let mut buffer = [0u16; 256];
+                let mut buffer_size = (buffer.len() * 2) as u32;
+                let mut reg_type = REG_VALUE_TYPE(0);
+                
+                let ss_active = "ScreenSaveActive\0".encode_utf16().collect::<Vec<u16>>();
+                if RegQueryValueExW(hkey, PCWSTR(ss_active.as_ptr()), None, Some(&mut reg_type), Some(buffer.as_mut_ptr() as *mut u8), Some(&mut buffer_size)) == ERROR_SUCCESS {
+                    let value = String::from_utf16_lossy(&buffer[..buffer_size as usize / 2 - 1]);
+                    screensaver_enabled = value == "1";
+                }
+
+                // Check screensaver password
+                let ss_secure = "ScreenSaverIsSecure\0".encode_utf16().collect::<Vec<u16>>();
+                buffer_size = (buffer.len() * 2) as u32;
+                if RegQueryValueExW(hkey, PCWSTR(ss_secure.as_ptr()), None, Some(&mut reg_type), Some(buffer.as_mut_ptr() as *mut u8), Some(&mut buffer_size)) == ERROR_SUCCESS {
+                    let value = String::from_utf16_lossy(&buffer[..buffer_size as usize / 2 - 1]);
+                    screensaver_secured = value == "1";
+                }
+
+                // Check screen timeout
+                let timeout_val = "ScreenSaveTimeOut\0".encode_utf16().collect::<Vec<u16>>();
+                buffer_size = (buffer.len() * 2) as u32;
+                if RegQueryValueExW(hkey, PCWSTR(timeout_val.as_ptr()), None, Some(&mut reg_type), Some(buffer.as_mut_ptr() as *mut u8), Some(&mut buffer_size)) == ERROR_SUCCESS {
+                    let value = String::from_utf16_lossy(&buffer[..buffer_size as usize / 2 - 1]);
+                    if let Ok(seconds) = value.parse::<u32>() {
+                        if seconds > 0 {
+                            screen_timeout = Some(seconds / 60);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Generate warnings
+        if screensaver_enabled {
+            warnings.push("屏幕保护程序已启用".to_string());
+        }
+        if screensaver_secured {
+            warnings.push("屏保需要密码 - 会导致锁屏".to_string());
+        }
+        if let Some(timeout) = screen_timeout {
+            if timeout > 0 && timeout < 999 {
+                warnings.push(format!("屏幕将在 {} 分钟后超时", timeout));
+            }
+        }
+
+        return SystemCheckResult {
+            screen_timeout,
+            screensaver_enabled,
+            screensaver_secured,
+            sleep_timeout,
+            warnings,
+        };
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        SystemCheckResult {
+            screen_timeout: None,
+            screensaver_enabled: false,
+            screensaver_secured: false,
+            sleep_timeout: None,
+            warnings: vec!["此功能仅支持 Windows".to_string()],
+        }
+    }
+}
+
+#[tauri::command]
+fn set_keep_awake(state: State<'_, AppState>, enable: bool) -> Result<String, String> {
+    state.keep_awake.store(enable, Ordering::SeqCst);
+    
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, EXECUTION_STATE};
+        
+        unsafe {
+            if enable {
+                // Prevent system sleep and display timeout
+                let flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED;
+                SetThreadExecutionState(EXECUTION_STATE(flags.0));
+                Ok("系统保持活跃模式已启用 ✓".to_string())
+            } else {
+                // Allow system to sleep normally
+                SetThreadExecutionState(ES_CONTINUOUS);
+                Ok("系统保持活跃模式已关闭".to_string())
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if enable {
+            Ok("保持活跃功能仅支持 Windows".to_string())
+        } else {
+            Ok("已关闭".to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn open_power_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        Command::new("cmd")
+            .args(&["/C", "start", "ms-settings:powersleep"])
+            .spawn()
+            .map_err(|e| format!("打开设置失败: {}", e))?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("此功能仅支持 Windows".to_string())
+    }
 }
 
 #[tauri::command]
@@ -325,6 +471,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             running: Arc::new(AtomicBool::new(false)),
+            keep_awake: Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![
             get_mouse_position,
@@ -332,7 +479,10 @@ pub fn run() {
             stop_clicking,
             get_status,
             check_privileges,
-            test_click_here
+            test_click_here,
+            check_system_settings,
+            set_keep_awake,
+            open_power_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

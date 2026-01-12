@@ -11,6 +11,8 @@ import {
   Mouse,
   Monitor,
   MapPin,
+  Shield,
+  ShieldAlert,
 } from "lucide-react";
 import clsx from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -43,6 +45,14 @@ type BackendLogPayload = {
   level: "error" | "info" | "warn" | string;
   message: string;
   time?: string;
+};
+
+type SystemCheckResult = {
+  screen_timeout: number | null;
+  screensaver_enabled: boolean;
+  screensaver_secured: boolean;
+  sleep_timeout: number | null;
+  warnings: string[];
 };
 
 // --- Components ---
@@ -95,6 +105,11 @@ function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logIdCounter = useRef(0);
   const [privilegeInfo, setPrivilegeInfo] = useState<string>("检查中...");
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [systemCheck, setSystemCheck] = useState<SystemCheckResult | null>(
+    null
+  );
+  const [keepAwake, setKeepAwake] = useState(true);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -103,11 +118,23 @@ function App() {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // Check privileges on mount
+  // Check privileges and system settings on mount
   useEffect(() => {
     invoke<string>("check_privileges")
-      .then((info) => setPrivilegeInfo(info))
+      .then((info) => {
+        setPrivilegeInfo(info);
+        setIsAdmin(info.includes("管理员权限"));
+      })
       .catch(() => setPrivilegeInfo("检查失败"));
+
+    invoke<SystemCheckResult>("check_system_settings")
+      .then((result) => setSystemCheck(result))
+      .catch(() => setSystemCheck(null));
+
+    // Auto-enable keep awake on startup
+    invoke<string>("set_keep_awake", { enable: true })
+      .then((result) => addLog("info", result))
+      .catch((e) => addLog("error", `启用保持活跃失败: ${e}`));
   }, []);
 
   // Listeners
@@ -217,6 +244,28 @@ function App() {
     }
   };
 
+  const toggleKeepAwake = async () => {
+    try {
+      const newState = !keepAwake;
+      const result = await invoke<string>("set_keep_awake", {
+        enable: newState,
+      });
+      setKeepAwake(newState);
+      addLog("info", result);
+    } catch (e: any) {
+      addLog("error", `切换保持活跃失败: ${String(e)}`);
+    }
+  };
+
+  const openPowerSettings = async () => {
+    try {
+      await invoke("open_power_settings");
+      addLog("info", "已打开电源设置");
+    } catch (e: any) {
+      addLog("error", `打开设置失败: ${String(e)}`);
+    }
+  };
+
   // Task Control
   const toggleTask = async () => {
     if (isRunning) {
@@ -264,7 +313,7 @@ function App() {
               自动点击助手
             </h1>
             <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-              解放双手，自动完成重复点击任务 V1.0
+              解放双手，自动完成重复点击任务
             </div>
           </div>
         </div>
@@ -278,9 +327,68 @@ function App() {
             测试点击
           </button>
 
-          <div className="text-xs text-slate-500 border-l border-slate-200 pl-3">
+          {/* Keep Awake Toggle */}
+          <div className="flex items-center gap-2 border-l border-slate-200 pl-3">
+            <span className="text-xs text-slate-500">保持活跃</span>
+            <div
+              className={cn(
+                "w-10 h-5 rounded-full relative cursor-pointer transition-colors",
+                keepAwake ? "bg-green-500" : "bg-slate-300"
+              )}
+              onClick={toggleKeepAwake}
+            >
+              <div
+                className={cn(
+                  "absolute top-1 w-3 h-3 bg-white rounded-full transition-all",
+                  keepAwake ? "left-6" : "left-1"
+                )}
+              />
+            </div>
+          </div>
+
+          <div
+            className={cn(
+              "flex items-center gap-1.5 text-xs border-l border-slate-200 pl-3 font-semibold",
+              isAdmin ? "text-green-600" : "text-red-500"
+            )}
+          >
+            {isAdmin ? (
+              <Shield className="w-4 h-4" />
+            ) : (
+              <ShieldAlert className="w-4 h-4" />
+            )}
             {privilegeInfo}
           </div>
+
+          {/* System Check Warning */}
+          {systemCheck && systemCheck.warnings.length > 0 && (
+            <div className="flex items-center gap-2 border-l border-slate-200 pl-3">
+              <div className="relative group">
+                <div className="flex items-center gap-1.5 text-xs text-amber-600 cursor-help">
+                  <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                  <span className="font-semibold">系统设置警告</span>
+                </div>
+                <div className="absolute top-full right-0 mt-2 w-72 bg-white rounded-lg shadow-xl border border-slate-200 p-3 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                  <div className="space-y-2">
+                    {systemCheck.warnings.map((warning, idx) => (
+                      <div
+                        key={idx}
+                        className="text-xs text-amber-700 bg-amber-50 px-2 py-1.5 rounded"
+                      >
+                        ⚠️ {warning}
+                      </div>
+                    ))}
+                    <button
+                      onClick={openPowerSettings}
+                      className="w-full text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded mt-2 font-semibold"
+                    >
+                      打开电源设置
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div
