@@ -27,11 +27,22 @@ type Area = {
   y2: number;
 };
 
+type Point = {
+  x: number;
+  y: number;
+};
+
 type LogEntry = {
   id: number;
   time: string;
   type: "click" | "scroll" | "info" | "error";
   message: string;
+};
+
+type BackendLogPayload = {
+  level: "error" | "info" | "warn" | string;
+  message: string;
+  time?: string;
 };
 
 // --- Components ---
@@ -68,7 +79,8 @@ const Card = ({
 function App() {
   // State
   const [regionName, setRegionName] = useState("");
-  const [area, setArea] = useState<Area | null>(null);
+  const [startPoint, setStartPoint] = useState<Point | null>(null);
+  const [endPoint, setEndPoint] = useState<Point | null>(null);
   const [captureStep, setCaptureStep] = useState<
     "none" | "topLeft" | "bottomRight"
   >("none");
@@ -82,6 +94,7 @@ function App() {
   const [clickCount, setClickCount] = useState(0);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logIdCounter = useRef(0);
+  const [privilegeInfo, setPrivilegeInfo] = useState<string>("检查中...");
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -90,11 +103,19 @@ function App() {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
+  // Check privileges on mount
+  useEffect(() => {
+    invoke<string>("check_privileges")
+      .then((info) => setPrivilegeInfo(info))
+      .catch(() => setPrivilegeInfo("检查失败"));
+  }, []);
+
   // Listeners
   useEffect(() => {
     let unlistenClick: () => void;
     let unlistenScroll: () => void;
     let unlistenStop: () => void;
+    let unlistenBackendLog: () => void;
 
     const setup = async () => {
       unlistenClick = await listen("click-event", (event: any) => {
@@ -115,12 +136,23 @@ function App() {
         setIsRunning(false);
         addLog("info", "任务已自动停止");
       });
+
+      unlistenBackendLog = await listen(
+        "backend-log",
+        (event: { payload: BackendLogPayload }) => {
+          const payload = event.payload;
+          const mappedType: LogEntry["type"] =
+            payload.level === "error" ? "error" : "info";
+          addLog(mappedType, `后端: ${payload.message}`, payload.time);
+        }
+      );
     };
     setup();
     return () => {
       unlistenClick?.();
       unlistenScroll?.();
       unlistenStop?.();
+      unlistenBackendLog?.();
     };
   }, []);
 
@@ -150,30 +182,40 @@ function App() {
       return () => clearTimeout(t);
     }
     if (captureCountdown === 0) {
-      invoke("get_mouse_position").then((pos: any) => {
-        const [x, y] = pos;
-        if (captureStep === "topLeft") {
-          setArea((prev) => ({
-            x1: x,
-            y1: y,
-            x2: prev?.x2 || 0,
-            y2: prev?.y2 || 0,
-          }));
-          addLog("info", `起点设定: ${x},${y}`);
-        } else {
-          setArea((prev) => ({
-            x1: prev?.x1 || 0,
-            y1: prev?.y1 || 0,
-            x2: x,
-            y2: y,
-          }));
-          addLog("info", `终点设定: ${x},${y}`);
-        }
-        setCaptureStep("none");
-        setCaptureCountdown(null);
-      });
+      invoke("get_mouse_position")
+        .then((pos: any) => {
+          const [x, y] = pos;
+          if (captureStep === "topLeft") {
+            setStartPoint({ x, y });
+            addLog("info", `起点设定: ${x},${y}`);
+          } else if (captureStep === "bottomRight") {
+            setEndPoint({ x, y });
+            addLog("info", `终点设定: ${x},${y}`);
+          }
+        })
+        .catch((e: any) => {
+          addLog("error", `获取鼠标坐标失败: ${String(e)}`);
+        })
+        .finally(() => {
+          setCaptureStep("none");
+          setCaptureCountdown(null);
+        });
     }
   }, [captureCountdown]);
+
+  const area: Area | null =
+    startPoint && endPoint
+      ? { x1: startPoint.x, y1: startPoint.y, x2: endPoint.x, y2: endPoint.y }
+      : null;
+
+  const testClickHere = async () => {
+    try {
+      const result = await invoke<string>("test_click_here");
+      addLog("info", result);
+    } catch (e: any) {
+      addLog("error", `测试失败: ${String(e)}`);
+    }
+  };
 
   // Task Control
   const toggleTask = async () => {
@@ -182,8 +224,12 @@ function App() {
       setIsRunning(false);
       addLog("info", "用户已停止任务");
     } else {
-      if (!area || (area.x1 === 0 && area.x2 === 0)) {
-        addLog("error", "未定义区域");
+      if (!startPoint || !endPoint || !area) {
+        addLog("error", "请先设置区域的起点和终点");
+        return;
+      }
+      if (startPoint.x === endPoint.x || startPoint.y === endPoint.y) {
+        addLog("error", "区域无效：起点/终点不能在同一直线");
         return;
       }
       try {
@@ -205,7 +251,7 @@ function App() {
   };
 
   return (
-    <div className="h-screen w-screen bg-[#F8FAFC] text-slate-800 flex flex-col font-sans select-none overflow-hidden">
+    <div className="h-screen w-screen bg-[#F8FAFC] text-slate-800 flex flex-col font-sans overflow-hidden">
       {/* Header */}
       <header className="h-16 px-8 flex items-center justify-between bg-white border-b border-slate-100 z-10 shrink-0">
         <div className="flex items-center gap-3">
@@ -219,6 +265,20 @@ function App() {
             <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
               专业版 Pro
             </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={testClickHere}
+            disabled={isRunning}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors disabled:opacity-50"
+          >
+            测试点击
+          </button>
+
+          <div className="text-xs text-slate-500 border-l border-slate-200 pl-3">
+            {privilegeInfo}
           </div>
         </div>
 
@@ -241,7 +301,7 @@ function App() {
       </header>
 
       {/* Main Grid */}
-      <main className="flex-1 p-3 grid grid-cols-12 grid-rows-[auto_1fr] gap-3 overflow-hidden">
+      <main className="flex-1 min-h-0 p-3 grid grid-cols-12 auto-rows-min gap-3 overflow-y-auto scrollbar-hide">
         {/* KPI Card */}
         <Card
           className="col-span-12 md:col-span-4 row-span-1 border-indigo-100 bg-linear-to-br from-white to-indigo-50/50"
@@ -262,13 +322,32 @@ function App() {
         <div className="col-span-12 md:col-span-8 row-span-1 grid grid-cols-2 gap-6 h-full">
           <Card icon={MapPin} title="目标区域" className="h-full">
             <div className="flex-1 flex flex-col gap-4">
-              <input
+              {/* <input
                 className="w-full bg-slate-50 border-none rounded-lg px-4 py-3 text-sm font-medium focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all placeholder:text-slate-400"
                 placeholder="区域名 (可选)"
                 value={regionName}
                 onChange={(e) => setRegionName(e.target.value)}
                 disabled={isRunning}
-              />
+              /> */}
+
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div className="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    起点
+                  </div>
+                  <div className="font-mono text-slate-700 mt-1">
+                    {startPoint ? `${startPoint.x}, ${startPoint.y}` : "未设置"}
+                  </div>
+                </div>
+                <div className="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    终点
+                  </div>
+                  <div className="font-mono text-slate-700 mt-1">
+                    {endPoint ? `${endPoint.x}, ${endPoint.y}` : "未设置"}
+                  </div>
+                </div>
+              </div>
 
               <div className="flex-1 grid grid-cols-2 gap-3">
                 <button
@@ -322,7 +401,7 @@ function App() {
           >
             {/* Background decorative glow */}
             {!isRunning && (
-              <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+              <div className="absolute inset-0 bg-linear-to-tr from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
             )}
 
             {isRunning ? (
@@ -450,12 +529,12 @@ function App() {
           </span>
           <span className="text-[10px] opacity-50">v1.0.0</span>
         </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-1.5 scrollbar-hide">
+        <div className="flex-1 overflow-y-auto p-4 space-y-1.5 scrollbar-hide select-text cursor-text">
           {logs.length === 0 && (
             <div className="text-slate-400 italic">准备就绪...</div>
           )}
           {logs.map((log) => (
-            <div key={log.id} className="flex gap-4 group">
+            <div key={log.id} className="flex gap-4 group select-text">
               <span className="opacity-40 w-16 text-right shrink-0">
                 {log.time}
               </span>
@@ -476,7 +555,7 @@ function App() {
           <div ref={logsEndRef} />
         </div>
         {/* subtle gradient at bottom of logs to fade */}
-        <div className="absolute bottom-0 left-0 right-0 h-6 bg-gradient-to-t from-white to-transparent pointer-events-none" />
+        <div className="absolute bottom-0 left-0 right-0 h-6 bg-linear-to-t from-white to-transparent pointer-events-none" />
       </footer>
     </div>
   );
