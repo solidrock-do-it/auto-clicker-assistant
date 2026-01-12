@@ -21,6 +21,7 @@ pub struct ClickConfig {
     interval: u64, // minutes
     enable_scroll: bool,
     scroll_interval: u32,
+    scroll_amount: i32, // scroll distance in units
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
@@ -198,7 +199,7 @@ async fn start_clicking(
                  // 50% chance up or down
                  let direction_sign = if rng.gen_bool(0.5) { 1 } else { -1 }; 
                  
-                 enigo.scroll(direction_sign * 3, Axis::Vertical).ok();
+                 enigo.scroll(direction_sign * config.scroll_amount, Axis::Vertical).ok();
                  
                  app.emit("scroll-event", ScrollEvent {
                      direction: if direction_sign > 0 { "Up".to_string() } else { "Down".to_string() },

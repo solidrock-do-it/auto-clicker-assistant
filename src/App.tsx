@@ -78,7 +78,6 @@ const Card = ({
 
 function App() {
   // State
-  const [regionName, setRegionName] = useState("");
   const [startPoint, setStartPoint] = useState<Point | null>(null);
   const [endPoint, setEndPoint] = useState<Point | null>(null);
   const [captureStep, setCaptureStep] = useState<
@@ -89,6 +88,7 @@ function App() {
   const [clickInterval, setClickInterval] = useState(30);
   const [enableScroll, setEnableScroll] = useState(true);
   const [scrollInterval, setScrollInterval] = useState(5);
+  const [scrollAmount, setScrollAmount] = useState(12);
 
   const [isRunning, setIsRunning] = useState(false);
   const [clickCount, setClickCount] = useState(0);
@@ -239,6 +239,7 @@ function App() {
             interval: clickInterval,
             enable_scroll: enableScroll,
             scroll_interval: scrollInterval,
+            scroll_amount: scrollAmount,
           },
         });
         setIsRunning(true);
@@ -263,7 +264,7 @@ function App() {
               自动点击助手
             </h1>
             <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-              专业版 Pro
+              解放双手，自动完成重复点击任务 V1.0
             </div>
           </div>
         </div>
@@ -360,12 +361,16 @@ function App() {
                       : "border-slate-200 text-slate-400"
                   )}
                 >
-                  {captureStep === "topLeft" && captureCountdown !== null ? (
-                    <div className="text-2xl font-bold">{captureCountdown}</div>
-                  ) : (
-                    <Focus className="w-5 h-5 opacity-70" />
-                  )}
-                  <span className="text-xs font-bold uppercase">左上角</span>
+                  <div className="grid place-items-center grid-cols-2">
+                    {captureStep === "topLeft" && captureCountdown !== null ? (
+                      <div className="text-2xl font-bold">
+                        {captureCountdown}
+                      </div>
+                    ) : (
+                      <Focus className="w-5 h-5 opacity-70" />
+                    )}
+                    <span className="text-xs font-bold uppercase">左上角</span>
+                  </div>
                 </button>
                 <button
                   disabled={isRunning}
@@ -377,13 +382,17 @@ function App() {
                       : "border-slate-200 text-slate-400"
                   )}
                 >
-                  {captureStep === "bottomRight" &&
-                  captureCountdown !== null ? (
-                    <div className="text-2xl font-bold">{captureCountdown}</div>
-                  ) : (
-                    <Focus className="w-5 h-5 opacity-70" />
-                  )}
-                  <span className="text-xs font-bold uppercase">右下角</span>
+                  <div className="grid place-items-center grid-cols-2 h-8">
+                    {captureStep === "bottomRight" &&
+                    captureCountdown !== null ? (
+                      <div className="text-2xl font-bold">
+                        {captureCountdown}
+                      </div>
+                    ) : (
+                      <Focus className="w-5 h-5 opacity-70" />
+                    )}
+                    <span className="text-xs font-bold uppercase">右下角</span>
+                  </div>
                 </button>
               </div>
             </div>
@@ -430,7 +439,7 @@ function App() {
           icon={Zap}
           title="配置"
         >
-          <div className="grid grid-cols-2 gap-12 px-2">
+          <div className="grid grid-cols-[200px_1fr] gap-8 px-2">
             {/* Click Interval */}
             <div className="space-y-4">
               <div className="flex justify-between items-center px-1">
@@ -480,13 +489,13 @@ function App() {
 
               <div
                 className={cn(
-                  "transition-all duration-300",
+                  "transition-all duration-300 grid grid-cols-2 gap-3",
                   enableScroll
                     ? "opacity-100"
                     : "opacity-30 pointer-events-none"
                 )}
               >
-                <div className="flex items-center gap-4 bg-slate-50 p-2 rounded-lg border border-slate-100">
+                <div className="flex items-center gap-2 bg-slate-50 p-2 rounded-lg border border-slate-100">
                   <div className="text-xs font-medium text-slate-500 uppercase flex-1 pl-2">
                     每隔
                   </div>
@@ -515,6 +524,38 @@ function App() {
                     次点击滚动
                   </div>
                 </div>
+
+                <div className="flex items-center gap-2 bg-slate-50 p-2 rounded-lg border border-slate-100">
+                  <div className="text-xs font-medium text-slate-500 uppercase flex-1 pl-2">
+                    滚动幅度
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="w-6 h-6 rounded bg-white shadow-sm flex items-center justify-center hover:bg-slate-100"
+                      onClick={() =>
+                        setScrollAmount(Math.max(1, scrollAmount - 1))
+                      }
+                      disabled={isRunning}
+                    >
+                      -
+                    </button>
+                    <span className="font-mono font-bold w-8 text-center">
+                      {scrollAmount}
+                    </span>
+                    <button
+                      className="w-6 h-6 rounded bg-white shadow-sm flex items-center justify-center hover:bg-slate-100"
+                      onClick={() =>
+                        setScrollAmount(Math.min(50, scrollAmount + 1))
+                      }
+                      disabled={isRunning}
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div className="text-xs font-medium text-slate-500 pr-2">
+                    行
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -540,7 +581,7 @@ function App() {
               </span>
               <span
                 className={cn(
-                  "flex-1 break-words font-medium",
+                  "flex-1 wrap-break-word font-medium",
                   log.type === "click" && "text-emerald-600",
                   log.type === "scroll" && "text-purple-600",
                   log.type === "error" && "text-red-500 font-bold",
