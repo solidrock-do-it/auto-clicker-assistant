@@ -13,9 +13,9 @@
     "windows": [
       {
         "title": "自动点击助手",
-        "width": 800,
+        "width": 900,
         "height": 600,
-        "minWidth": 800,
+        "minWidth": 900,
         "minHeight": 600,
         "resizable": true
       }

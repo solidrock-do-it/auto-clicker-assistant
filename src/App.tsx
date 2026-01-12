@@ -323,7 +323,7 @@ function App() {
   return (
     <div className="h-screen w-screen bg-[#F8FAFC] text-slate-800 flex flex-col font-sans overflow-hidden">
       {/* Header */}
-      <header className="h-16 px-8 flex items-center justify-between bg-white border-b border-slate-100 z-10 shrink-0">
+      <header className="h-16 px-3 flex items-center justify-between bg-white border-b border-slate-100 z-10 shrink-0">
         <div className="flex items-center gap-3">
           <div className="bg-indigo-600 p-2 rounded-lg text-white shadow-lg shadow-indigo-200">
             <Mouse className="w-5 h-5" />
@@ -333,7 +333,7 @@ function App() {
               自动点击助手
             </h1>
             <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-              解放双手，自动完成重复点击任务
+              自动完成重复点击任务
             </div>
           </div>
         </div>
