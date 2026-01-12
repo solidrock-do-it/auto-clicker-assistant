@@ -40,7 +40,12 @@
       },
       "allowDowngrades": true,
       "wix": null,
-      "nsis": null
+      "nsis": {
+        "displayLanguageSelector": false,
+        "languages": ["SimpChinese"],
+        "installerIcon": "icons/icon.ico",
+        "installMode": "perMachine"
+      }
     }
   }
 }
