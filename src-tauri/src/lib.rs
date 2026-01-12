@@ -111,6 +111,47 @@ fn check_privileges() -> String {
 }
 
 #[tauri::command]
+fn relaunch_as_admin(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+
+        let exe = std::env::current_exe().map_err(|e| format!("获取程序路径失败: {}", e))?;
+        let exe_str = exe
+            .to_str()
+            .ok_or_else(|| "程序路径包含无法识别的字符".to_string())?
+            .to_string();
+
+        // 通过 PowerShell 触发 UAC 提权启动（用户会看到系统弹窗，无法静默提权）
+        // -WindowStyle Hidden: 不弹出额外的 PowerShell 窗口
+        // -Verb RunAs: 以管理员身份运行
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                &format!(
+                    "Start-Process -FilePath '{}' -Verb RunAs",
+                    exe_str.replace("'", "''")
+                ),
+            ])
+            .spawn()
+            .map_err(|e| format!("提权启动失败: {}", e))?;
+
+        // 退出当前非管理员实例
+        app.exit(0);
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("此功能仅支持 Windows".to_string())
+    }
+}
+
+#[tauri::command]
 fn test_click_here() -> Result<String, String> {
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("{:?}", e))?;
     let (x, y) = enigo.location().map_err(|e| format!("{:?}", e))?;
@@ -482,7 +523,8 @@ pub fn run() {
             test_click_here,
             check_system_settings,
             set_keep_awake,
-            open_power_settings
+            open_power_settings,
+            relaunch_as_admin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

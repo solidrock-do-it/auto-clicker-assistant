@@ -123,7 +123,19 @@ function App() {
     invoke<string>("check_privileges")
       .then((info) => {
         setPrivilegeInfo(info);
-        setIsAdmin(info.includes("管理员权限"));
+        const admin = info.includes("管理员权限");
+        setIsAdmin(admin);
+
+        // 非管理员时：可选自动提权重启（会弹 UAC；为避免每次启动都弹，做一次性标记）
+        if (!admin) {
+          const prompted = localStorage.getItem("aca_admin_prompted") === "1";
+          if (!prompted) {
+            localStorage.setItem("aca_admin_prompted", "1");
+            invoke("relaunch_as_admin").catch(() => {
+              // 用户拒绝 UAC 或启动失败时，不强制打断；保留红色提示 + 手动按钮
+            });
+          }
+        }
       })
       .catch(() => setPrivilegeInfo("检查失败"));
 
@@ -266,6 +278,14 @@ function App() {
     }
   };
 
+  const relaunchAsAdmin = async () => {
+    try {
+      await invoke("relaunch_as_admin");
+    } catch (e: any) {
+      addLog("error", `以管理员重启失败: ${String(e)}`);
+    }
+  };
+
   // Task Control
   const toggleTask = async () => {
     if (isRunning) {
@@ -358,6 +378,14 @@ function App() {
               <ShieldAlert className="w-4 h-4" />
             )}
             {privilegeInfo}
+            {!isAdmin && (
+              <button
+                onClick={relaunchAsAdmin}
+                className="ml-2 px-2 py-1 rounded-md bg-red-50 hover:bg-red-100 text-red-600 text-[10px] font-bold"
+              >
+                以管理员重启
+              </button>
+            )}
           </div>
 
           {/* System Check Warning */}
