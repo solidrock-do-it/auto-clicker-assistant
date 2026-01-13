@@ -16,9 +16,22 @@ pub struct Area {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
-pub struct ClickConfig {
+#[serde(rename_all = "lowercase")]
+pub enum RegionType {
+    List,
+    Button,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
+pub struct ClickRegion {
+    r#type: RegionType,
     area: Area,
-    interval: u64, // minutes
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
+pub struct ClickConfig {
+    regions: Vec<ClickRegion>,
+    interval: u64, // minutes (wait after each full regions cycle)
     enable_scroll: bool,
     scroll_interval: u32,
     scroll_amount: i32, // scroll distance in units
@@ -319,6 +332,10 @@ async fn start_clicking(
         return Err("Already running".into());
     }
 
+    if config.regions.is_empty() {
+        return Err("请先配置至少一个区域".into());
+    }
+
     state.running.store(true, Ordering::SeqCst);
     let running = state.running.clone();
     
@@ -367,139 +384,172 @@ async fn start_clicking(
             thread::sleep(Duration::from_millis(rng.gen_range(60..=140)));
         }
 
-        // Ensure correct order of coordinates
-        let x_start = std::cmp::min(config.area.x1, config.area.x2);
-        let x_end = std::cmp::max(config.area.x1, config.area.x2);
-        let y_start = std::cmp::min(config.area.y1, config.area.y2);
-        let y_end = std::cmp::max(config.area.y1, config.area.y2);
-
         while running.load(Ordering::SeqCst) {
-            
-             // 1. Scroll Check
-            if config.enable_scroll && clicks_since_scroll >= config.scroll_interval {
-                 let center_x = (x_start + x_end) / 2;
-                 let center_y = (y_start + y_end) / 2;
-                 
-                 enigo.move_mouse(center_x, center_y, Coordinate::Abs).ok();
-                 thread::sleep(Duration::from_millis(300));
-                 
-                 // 50% chance up or down
-                 let direction_sign = if rng.gen_bool(0.5) { 1 } else { -1 }; 
-                 
-                 enigo.scroll(direction_sign * config.scroll_amount, Axis::Vertical).ok();
-                 
-                 app.emit("scroll-event", ScrollEvent {
-                     direction: if direction_sign > 0 { "Up".to_string() } else { "Down".to_string() },
-                     time: Local::now().format("%H:%M:%S").to_string()
-                 }).ok();
-                 
-                 clicks_since_scroll = 0;
-                 thread::sleep(Duration::from_millis(300));
+            fn normalize_area(area: &Area) -> (i32, i32, i32, i32) {
+                let x_start = std::cmp::min(area.x1, area.x2);
+                let x_end = std::cmp::max(area.x1, area.x2);
+                let y_start = std::cmp::min(area.y1, area.y2);
+                let y_end = std::cmp::max(area.y1, area.y2);
+                (x_start, x_end, y_start, y_end)
             }
-            
-            // 2. Determine Click Position (PRD策略)
-            // - 按可见区域高度计算行数（每行约 40 像素）
-            // - 随机选择某一行
-            // - X 取列表宽度中间 2/3
-            // - Y 取行高中间 1/3
-            let row_height: i32 = 40;
-            let height = y_end - y_start;
-            let num_rows = std::cmp::max(1, height / row_height);
 
-            let row_idx = rng.gen_range(0..num_rows);
-            let row_top = y_start + row_idx * row_height;
-            let row_bottom = std::cmp::min(row_top + row_height, y_end);
+            // 一轮：按区域顺序依次执行一次点击
+            for region in config.regions.iter() {
+                if !running.load(Ordering::SeqCst) {
+                    break;
+                }
 
-            let width = x_end - x_start;
-            let x_margin = width / 6;
-            let x_min = x_start + x_margin;
-            let x_max = x_end - x_margin;
+                let (x_start, x_end, y_start, y_end) = normalize_area(&region.area);
 
-            let target_x = if x_max > x_min {
-                rng.gen_range(x_min..x_max)
-            } else {
-                (x_start + x_end) / 2
-            };
+                // 1) Scroll Check（按“点击次数”触发；在当前区域中心滚动）
+                if config.enable_scroll && clicks_since_scroll >= config.scroll_interval {
+                    let center_x = (x_start + x_end) / 2;
+                    let center_y = (y_start + y_end) / 2;
 
-            let row_span = row_bottom - row_top;
-            let y_margin = row_span / 3;
-            let y_min = row_top + y_margin;
-            let y_max = row_bottom - y_margin;
-            let target_y = if y_max > y_min {
-                rng.gen_range(y_min..y_max)
-            } else {
-                row_top + row_span / 2
-            };
+                    enigo.move_mouse(center_x, center_y, Coordinate::Abs).ok();
+                    thread::sleep(Duration::from_millis(300));
 
-            // 3. Move and Click (simulate human)
-            // 3.1 Move with easing + jitter, then settle
-            human_move_mouse(&mut enigo, &mut rng, target_x, target_y);
+                    // 50% chance up or down
+                    let direction_sign = if rng.gen_bool(0.5) { 1 } else { -1 };
 
-            // 3.2 Press / hold / release (some apps ignore ultra-fast injected clicks)
-            let press_ok = match enigo.button(Button::Left, Direction::Press) {
-                Ok(_) => true,
-                Err(e) => {
+                    enigo
+                        .scroll(direction_sign * config.scroll_amount, Axis::Vertical)
+                        .ok();
+
                     app.emit(
-                        "backend-log",
-                        BackendLog {
-                            level: "error".to_string(),
-                            message: format!("press failed: {:?}", e),
+                        "scroll-event",
+                        ScrollEvent {
+                            direction: if direction_sign > 0 {
+                                "Up".to_string()
+                            } else {
+                                "Down".to_string()
+                            },
                             time: Local::now().format("%H:%M:%S").to_string(),
                         },
                     )
                     .ok();
-                    false
+
+                    clicks_since_scroll = 0;
+                    thread::sleep(Duration::from_millis(300));
                 }
-            };
 
-            // hold time
-            thread::sleep(Duration::from_millis(rng.gen_range(80..=220)));
+                // 2) Determine Click Position
+                // list: 现有 PRD 策略
+                // button: 区域中心点
+                let (target_x, target_y) = match region.r#type {
+                    RegionType::Button => ((x_start + x_end) / 2, (y_start + y_end) / 2),
+                    RegionType::List => {
+                        // - 按可见区域高度计算行数（每行约 40 像素）
+                        // - 随机选择某一行
+                        // - X 取列表宽度中间 2/3
+                        // - Y 取行高中间 1/3
+                        let row_height: i32 = 40;
+                        let height = y_end - y_start;
+                        let num_rows = std::cmp::max(1, height / row_height);
 
-            let release_ok = match enigo.button(Button::Left, Direction::Release) {
-                Ok(_) => true,
-                Err(e) => {
+                        let row_idx = rng.gen_range(0..num_rows);
+                        let row_top = y_start + row_idx * row_height;
+                        let row_bottom = std::cmp::min(row_top + row_height, y_end);
+
+                        let width = x_end - x_start;
+                        let x_margin = width / 6;
+                        let x_min = x_start + x_margin;
+                        let x_max = x_end - x_margin;
+
+                        let x = if x_max > x_min {
+                            rng.gen_range(x_min..x_max)
+                        } else {
+                            (x_start + x_end) / 2
+                        };
+
+                        let row_span = row_bottom - row_top;
+                        let y_margin = row_span / 3;
+                        let y_min = row_top + y_margin;
+                        let y_max = row_bottom - y_margin;
+                        let y = if y_max > y_min {
+                            rng.gen_range(y_min..y_max)
+                        } else {
+                            row_top + row_span / 2
+                        };
+
+                        (x, y)
+                    }
+                };
+
+                // 3) Move and Click (simulate human)
+                human_move_mouse(&mut enigo, &mut rng, target_x, target_y);
+
+                let press_ok = match enigo.button(Button::Left, Direction::Press) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        app.emit(
+                            "backend-log",
+                            BackendLog {
+                                level: "error".to_string(),
+                                message: format!("press failed: {:?}", e),
+                                time: Local::now().format("%H:%M:%S").to_string(),
+                            },
+                        )
+                        .ok();
+                        false
+                    }
+                };
+
+                thread::sleep(Duration::from_millis(rng.gen_range(80..=220)));
+
+                let release_ok = match enigo.button(Button::Left, Direction::Release) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        app.emit(
+                            "backend-log",
+                            BackendLog {
+                                level: "error".to_string(),
+                                message: format!("release failed: {:?}", e),
+                                time: Local::now().format("%H:%M:%S").to_string(),
+                            },
+                        )
+                        .ok();
+                        false
+                    }
+                };
+
+                let click_ok = press_ok && release_ok;
+
+                click_count += 1;
+                clicks_since_scroll += 1;
+
+                if click_ok {
                     app.emit(
-                        "backend-log",
-                        BackendLog {
-                            level: "error".to_string(),
-                            message: format!("release failed: {:?}", e),
+                        "click-event",
+                        ClickEvent {
                             time: Local::now().format("%H:%M:%S").to_string(),
+                            x: target_x,
+                            y: target_y,
+                            count: click_count,
                         },
                     )
                     .ok();
-                    false
                 }
-            };
-
-            let click_ok = press_ok && release_ok;
-            
-            click_count += 1;
-            clicks_since_scroll += 1;
-            
-            if click_ok {
-                app.emit(
-                    "click-event",
-                    ClickEvent {
-                        time: Local::now().format("%H:%M:%S").to_string(),
-                        x: target_x,
-                        y: target_y,
-                        count: click_count,
-                    },
-                )
-                .ok();
             }
-            
-            // 4. Wait Interval
-            // Convert Minutes to Seconds
+
+            // 4) Wait Interval（每轮区域结束后等待）
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+
             let sleep_secs = config.interval * 60;
-            
-            // Check every 100ms
-            let sleep_steps = sleep_secs * 10; 
+            let sleep_steps = sleep_secs * 10;
             for _ in 0..sleep_steps {
-                if !running.load(Ordering::SeqCst) { break; }
+                if !running.load(Ordering::SeqCst) {
+                    break;
+                }
                 thread::sleep(Duration::from_millis(100));
             }
         }
+
+        // ensure stopped state + notify UI
+        running.store(false, Ordering::SeqCst);
+        app.emit("auto-stopped", ()).ok();
         
     });
 

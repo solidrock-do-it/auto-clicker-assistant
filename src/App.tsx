@@ -6,11 +6,9 @@ import {
   Square,
   Focus,
   Activity,
-  Zap,
   Clock,
   Mouse,
   Monitor,
-  MapPin,
   Shield,
   ShieldAlert,
 } from "lucide-react";
@@ -28,6 +26,8 @@ type Area = {
   x2: number;
   y2: number;
 };
+
+type RegionType = "list" | "button";
 
 type Point = {
   x: number;
@@ -55,6 +55,76 @@ type SystemCheckResult = {
   warnings: string[];
 };
 
+type RegionConfig = {
+  id: string;
+  name: string;
+  type: RegionType;
+  startPoint: Point | null;
+  endPoint: Point | null;
+};
+
+type PersistedSettingsV1 = {
+  clickInterval?: number;
+  enableScroll?: boolean;
+  scrollInterval?: number;
+  scrollAmount?: number;
+  keepAwake?: boolean;
+  regions?: RegionConfig[];
+};
+
+const STORAGE_KEY = "aca_settings_v1";
+
+function makeId() {
+  const anyCrypto = (globalThis as any).crypto;
+  if (anyCrypto?.randomUUID) return anyCrypto.randomUUID();
+  return `r_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function createDefaultRegions(): RegionConfig[] {
+  const defaults: { name: string; type: RegionType }[] = [
+    {
+      name: "IP列表",
+      type: "list",
+    },
+    {
+      name: "一键更换路线",
+      type: "button",
+    },
+    {
+      name: "确定更换路线",
+      type: "button",
+    },
+  ];
+
+  return defaults.map((region, i) => ({
+    id: makeId(),
+    name: `${region.name}-${i + 1}`,
+    type: region.type,
+    startPoint: null,
+    endPoint: null,
+  }));
+}
+
+function safeLoadSettings(): PersistedSettingsV1 | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function safeSaveSettings(settings: PersistedSettingsV1) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // ignore
+  }
+}
+
 // --- Components ---
 
 const Card = ({
@@ -70,12 +140,12 @@ const Card = ({
 }) => (
   <div
     className={cn(
-      "bg-white rounded-2xl p-5 shadow-sm border border-slate-100/50 flex flex-col",
+      "bg-white rounded-2xl p-2 shadow-sm border border-slate-100/50 flex flex-col",
       className
     )}
   >
     {title && (
-      <div className="flex items-center gap-2 mb-4 text-slate-400 uppercase tracking-widest text-[10px] font-bold">
+      <div className="flex items-center gap-2 mb-2 text-slate-400 uppercase tracking-widest text-[10px] font-bold">
         {Icon && <Icon className="w-3 h-3" />}
         {title}
       </div>
@@ -88,17 +158,53 @@ const Card = ({
 
 function App() {
   // State
-  const [startPoint, setStartPoint] = useState<Point | null>(null);
-  const [endPoint, setEndPoint] = useState<Point | null>(null);
+  const persisted = safeLoadSettings();
+
+  const [regions, setRegions] = useState<RegionConfig[]>(() => {
+    const fromStorage = persisted?.regions;
+    if (Array.isArray(fromStorage) && fromStorage.length > 0) {
+      // best-effort migrate/validate
+      return fromStorage.map((r, idx) => ({
+        id: typeof r?.id === "string" ? r.id : makeId(),
+        name: typeof r?.name === "string" ? r.name : `区域 ${idx + 1}`,
+        type: r?.type === "button" ? "button" : "list",
+        startPoint:
+          r?.startPoint &&
+          typeof r.startPoint.x === "number" &&
+          typeof r.startPoint.y === "number"
+            ? r.startPoint
+            : null,
+        endPoint:
+          r?.endPoint &&
+          typeof r.endPoint.x === "number" &&
+          typeof r.endPoint.y === "number"
+            ? r.endPoint
+            : null,
+      }));
+    }
+    return createDefaultRegions();
+  });
+
+  const [activeRegionId, setActiveRegionId] = useState<string | null>(null);
+
   const [captureStep, setCaptureStep] = useState<
     "none" | "topLeft" | "bottomRight"
   >("none");
+  const [captureRegionId, setCaptureRegionId] = useState<string | null>(null);
   const [captureCountdown, setCaptureCountdown] = useState<number | null>(null);
 
-  const [clickInterval, setClickInterval] = useState(30);
-  const [enableScroll, setEnableScroll] = useState(true);
-  const [scrollInterval, setScrollInterval] = useState(5);
-  const [scrollAmount, setScrollAmount] = useState(12);
+  const [clickInterval, setClickInterval] = useState(
+    typeof persisted?.clickInterval === "number" ? persisted.clickInterval : 30
+  );
+  const [enableScroll, setEnableScroll] = useState(
+    typeof persisted?.enableScroll === "boolean" ? persisted.enableScroll : true
+  );
+  const [scrollInterval, setScrollInterval] = useState(
+    typeof persisted?.scrollInterval === "number" ? persisted.scrollInterval : 5
+  );
+  const [scrollAmount, setScrollAmount] = useState(
+    typeof persisted?.scrollAmount === "number" ? persisted.scrollAmount : 12
+  );
 
   const [isRunning, setIsRunning] = useState(false);
   const [clickCount, setClickCount] = useState(0);
@@ -109,7 +215,9 @@ function App() {
   const [systemCheck, setSystemCheck] = useState<SystemCheckResult | null>(
     null
   );
-  const [keepAwake, setKeepAwake] = useState(true);
+  const [keepAwake, setKeepAwake] = useState(
+    typeof persisted?.keepAwake === "boolean" ? persisted.keepAwake : true
+  );
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -143,11 +251,38 @@ function App() {
       .then((result) => setSystemCheck(result))
       .catch(() => setSystemCheck(null));
 
-    // Auto-enable keep awake on startup
-    invoke<string>("set_keep_awake", { enable: true })
+    // Apply keep awake on startup (persisted)
+    invoke<string>("set_keep_awake", { enable: keepAwake })
       .then((result) => addLog("info", result))
       .catch((e) => addLog("error", `启用保持活跃失败: ${e}`));
   }, []);
+
+  // Ensure active region is always valid
+  useEffect(() => {
+    if (regions.length === 0) return;
+    if (!activeRegionId || !regions.some((r) => r.id === activeRegionId)) {
+      setActiveRegionId(regions[0].id);
+    }
+  }, [regions, activeRegionId]);
+
+  // Persist settings + regions
+  useEffect(() => {
+    safeSaveSettings({
+      clickInterval,
+      enableScroll,
+      scrollInterval,
+      scrollAmount,
+      keepAwake,
+      regions,
+    });
+  }, [
+    clickInterval,
+    enableScroll,
+    scrollInterval,
+    scrollAmount,
+    keepAwake,
+    regions,
+  ]);
 
   // Listeners
   useEffect(() => {
@@ -173,7 +308,7 @@ function App() {
 
       unlistenStop = await listen("auto-stopped", () => {
         setIsRunning(false);
-        addLog("info", "任务已自动停止");
+        addLog("info", "任务已停止");
       });
 
       unlistenBackendLog = await listen(
@@ -207,7 +342,12 @@ function App() {
 
   // Capture Logic
   const startCapture = (step: "topLeft" | "bottomRight") => {
+    if (!activeRegionId) {
+      addLog("error", "请先选择一个区域");
+      return;
+    }
     setCaptureStep(step);
+    setCaptureRegionId(activeRegionId);
     setCaptureCountdown(3);
   };
 
@@ -224,12 +364,23 @@ function App() {
       invoke("get_mouse_position")
         .then((pos: any) => {
           const [x, y] = pos;
+          const targetRegionId = captureRegionId;
+          if (!targetRegionId) return;
+
           if (captureStep === "topLeft") {
-            setStartPoint({ x, y });
-            addLog("info", `起点设定: ${x},${y}`);
+            setRegions((prev) =>
+              prev.map((r) =>
+                r.id === targetRegionId ? { ...r, startPoint: { x, y } } : r
+              )
+            );
+            addLog("info", `左上角设定: ${x},${y}`);
           } else if (captureStep === "bottomRight") {
-            setEndPoint({ x, y });
-            addLog("info", `终点设定: ${x},${y}`);
+            setRegions((prev) =>
+              prev.map((r) =>
+                r.id === targetRegionId ? { ...r, endPoint: { x, y } } : r
+              )
+            );
+            addLog("info", `右下角设定: ${x},${y}`);
           }
         })
         .catch((e: any) => {
@@ -237,15 +388,60 @@ function App() {
         })
         .finally(() => {
           setCaptureStep("none");
+          setCaptureRegionId(null);
           setCaptureCountdown(null);
         });
     }
-  }, [captureCountdown]);
+  }, [captureCountdown, captureRegionId, captureStep]);
 
-  const area: Area | null =
-    startPoint && endPoint
-      ? { x1: startPoint.x, y1: startPoint.y, x2: endPoint.x, y2: endPoint.y }
-      : null;
+  const activeRegion = regions.find((r) => r.id === activeRegionId) || null;
+
+  const buildArea = (region: RegionConfig): Area | null => {
+    if (!region.startPoint || !region.endPoint) return null;
+    return {
+      x1: region.startPoint.x,
+      y1: region.startPoint.y,
+      x2: region.endPoint.x,
+      y2: region.endPoint.y,
+    };
+  };
+
+  const addRegion = () => {
+    const nextIndex = regions.length + 1;
+    const newRegion: RegionConfig = {
+      id: makeId(),
+      name: `区域 ${nextIndex}`,
+      type: "list",
+      startPoint: null,
+      endPoint: null,
+    };
+    setRegions((prev) => [...prev, newRegion]);
+    setActiveRegionId(newRegion.id);
+  };
+
+  const removeRegion = (id: string) => {
+    setRegions((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  const moveRegion = (id: string, direction: "up" | "down") => {
+    setRegions((prev) => {
+      const idx = prev.findIndex((r) => r.id === id);
+      if (idx < 0) return prev;
+      const nextIdx = direction === "up" ? idx - 1 : idx + 1;
+      if (nextIdx < 0 || nextIdx >= prev.length) return prev;
+      const clone = [...prev];
+      const tmp = clone[idx];
+      clone[idx] = clone[nextIdx];
+      clone[nextIdx] = tmp;
+      return clone;
+    });
+  };
+
+  const updateRegion = (id: string, patch: Partial<RegionConfig>) => {
+    setRegions((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, ...patch } : r))
+    );
+  };
 
   const testClickHere = async () => {
     try {
@@ -293,18 +489,56 @@ function App() {
       setIsRunning(false);
       addLog("info", "用户已停止任务");
     } else {
-      if (!startPoint || !endPoint || !area) {
-        addLog("error", "请先设置区域的起点和终点");
+      if (regions.length === 0) {
+        addLog("error", "请先添加至少一个区域");
         return;
       }
-      if (startPoint.x === endPoint.x || startPoint.y === endPoint.y) {
-        addLog("error", "区域无效：起点/终点不能在同一直线");
+
+      const missing = regions
+        .map((r, idx) => ({ r, idx }))
+        .filter(({ r }) => !r.startPoint || !r.endPoint);
+      if (missing.length > 0) {
+        const names = missing
+          .slice(0, 3)
+          .map(({ r, idx }) => r.name || `区域 ${idx + 1}`)
+          .join("、");
+        addLog(
+          "error",
+          `请先设置以下区域的起点和终点: ${names}${
+            missing.length > 3 ? "..." : ""
+          }`
+        );
+        return;
+      }
+
+      const invalid = regions
+        .map((r, idx) => ({ r, idx }))
+        .filter(({ r }) => {
+          if (!r.startPoint || !r.endPoint) return true;
+          return (
+            r.startPoint.x === r.endPoint.x || r.startPoint.y === r.endPoint.y
+          );
+        });
+      if (invalid.length > 0) {
+        const names = invalid
+          .slice(0, 3)
+          .map(({ r, idx }) => r.name || `区域 ${idx + 1}`)
+          .join("、");
+        addLog(
+          "error",
+          `区域无效：起点/终点不能在同一直线 (${names}${
+            invalid.length > 3 ? "..." : ""
+          })`
+        );
         return;
       }
       try {
         await invoke("start_clicking", {
           config: {
-            area,
+            regions: regions.map((r) => ({
+              type: r.type,
+              area: buildArea(r)!,
+            })),
             interval: clickInterval,
             enable_scroll: enableScroll,
             scroll_interval: scrollInterval,
@@ -439,148 +673,248 @@ function App() {
 
       {/* Main Grid */}
       <main className="flex-1 min-h-0 p-3 grid grid-cols-12 auto-rows-min gap-3 overflow-y-auto scrollbar-hide">
-        {/* KPI Card */}
-        <Card
-          className="col-span-12 md:col-span-4 row-span-1 border-indigo-100 bg-linear-to-br from-white to-indigo-50/50"
-          icon={Activity}
-          title="活动统计"
-        >
-          <div className="flex-1 flex flex-col justify-center items-center">
-            <div className="text-6xl font-black text-indigo-600 tabular-nums tracking-tighter drop-shadow-sm">
-              {clickCount.toLocaleString()}
-            </div>
-            <div className="text-sm font-medium text-slate-400 mt-2">
-              总点击数
-            </div>
-          </div>
-        </Card>
-
-        {/* Region Card */}
-        <div className="col-span-12 md:col-span-8 row-span-1 grid grid-cols-2 gap-6 h-full">
-          <Card icon={MapPin} title="目标区域" className="h-full">
-            <div className="flex-1 flex flex-col gap-4">
-              {/* <input
-                className="w-full bg-slate-50 border-none rounded-lg px-4 py-3 text-sm font-medium focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all placeholder:text-slate-400"
-                placeholder="区域名 (可选)"
-                value={regionName}
-                onChange={(e) => setRegionName(e.target.value)}
-                disabled={isRunning}
-              /> */}
-
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div className="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    起点
-                  </div>
-                  <div className="font-mono text-slate-700 mt-1">
-                    {startPoint ? `${startPoint.x}, ${startPoint.y}` : "未设置"}
-                  </div>
+        {/* Top Layout: 2/3 + 1/3 (right column split into two cards) */}
+        <section className="col-span-12 grid grid-cols-12 gap-3 items-stretch">
+          {/* Left: Target Regions (2/3) */}
+          <Card className="col-span-9 h-full">
+            <div className="flex-1 flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                  区域顺序（每轮按顺序依次点击）
                 </div>
-                <div className="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    终点
-                  </div>
-                  <div className="font-mono text-slate-700 mt-1">
-                    {endPoint ? `${endPoint.x}, ${endPoint.y}` : "未设置"}
-                  </div>
-                </div>
+                <button
+                  onClick={addRegion}
+                  disabled={isRunning}
+                  className="px-2.5 py-1 rounded-md text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-50"
+                >
+                  + 新增区域
+                </button>
               </div>
 
-              <div className="flex-1 grid grid-cols-2 gap-3">
+              <div className="space-y-1 max-h-36 overflow-y-auto pr-1">
+                {regions.map((r, idx) => {
+                  const active = r.id === activeRegionId;
+                  return (
+                    <div
+                      key={r.id}
+                      className={cn(
+                        "p-1 rounded-xl border transition-colors",
+                        active
+                          ? "border-indigo-200 bg-indigo-50/40"
+                          : "border-slate-100 bg-white"
+                      )}
+                    >
+                      <div className="flex justify-between items-center col-span-2 not-visited:items-center gap-2">
+                        <div className="flex items-center gap-2 col-span-12 not-visited:items-center">
+                          <button
+                            type="button"
+                            disabled={isRunning}
+                            onClick={() => setActiveRegionId(r.id)}
+                            className={cn(
+                              "w-7 h-7 rounded-lg text-xs font-black grid place-items-center shrink-0",
+                              active
+                                ? "bg-indigo-600 text-white"
+                                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                            )}
+                          >
+                            {idx + 1}
+                          </button>
+
+                          <input
+                            value={r.name}
+                            disabled={isRunning}
+                            onChange={(e) =>
+                              updateRegion(r.id, { name: e.target.value })
+                            }
+                            className="flex col-span-1 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-semibold outline-none focus:ring-1 focus:ring-indigo-500/20"
+                            placeholder={`区域 ${idx + 1}`}
+                          />
+
+                          <select
+                            value={r.type}
+                            disabled={isRunning}
+                            onChange={(e) =>
+                              updateRegion(r.id, {
+                                type: e.target.value as RegionType,
+                              })
+                            }
+                            className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-slate-700"
+                          >
+                            <option value="list">列表-随机行</option>
+                            <option value="button">按钮-中心点</option>
+                          </select>
+
+                          <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                            <div className="truncate">
+                              <span className="font-bold">起点:</span>
+                              {r.startPoint
+                                ? ` ${r.startPoint.x}, ${r.startPoint.y}`
+                                : " 未设置"}
+                              <span className="mx-2 opacity-40">|</span>
+                              <span className="font-bold">终点:</span>
+                              {r.endPoint
+                                ? ` ${r.endPoint.x}, ${r.endPoint.y}`
+                                : " 未设置"}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            disabled={isRunning || idx === 0}
+                            onClick={() => moveRegion(r.id, "up")}
+                            className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black disabled:opacity-40"
+                            title="上移"
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isRunning || idx === regions.length - 1}
+                            onClick={() => moveRegion(r.id, "down")}
+                            className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black disabled:opacity-40"
+                            title="下移"
+                          >
+                            ↓
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isRunning || regions.length <= 1}
+                            onClick={() => removeRegion(r.id)}
+                            className="w-7 h-7 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-xs font-black disabled:opacity-40"
+                            title="删除"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-4 gap-3 text-xs">
+                <div className="bg-slate-50 border border-slate-100 rounded-xl px-2 py-2 flex flex-col justify-center items-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 text-center whitespace-nowrap">
+                    当前区域起点
+                  </div>
+                  <div className="font-mono text-slate-700 mt-1 font-bold">
+                    {activeRegion?.startPoint
+                      ? `${activeRegion.startPoint.x}, ${activeRegion.startPoint.y}`
+                      : "未设置"}
+                  </div>
+                </div>
+                <div className="bg-slate-50 border border-slate-100 rounded-xl px-2 py-2 flex flex-col justify-center items-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 text-center whitespace-nowrap">
+                    当前区域终点
+                  </div>
+                  <div className="font-mono text-slate-700 mt-1 font-bold">
+                    {activeRegion?.endPoint
+                      ? `${activeRegion.endPoint.x}, ${activeRegion.endPoint.y}`
+                      : "未设置"}
+                  </div>
+                </div>
+
                 <button
-                  disabled={isRunning}
+                  disabled={isRunning || !activeRegionId}
                   onClick={() => startCapture("topLeft")}
                   className={cn(
-                    "rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-2 transition-all hover:bg-slate-50",
+                    "rounded-xl border-2 border-dashed flex flex-col-2 items-center justify-center gap-3 py-1 transition-all hover:bg-slate-50",
                     captureStep === "topLeft"
                       ? "border-indigo-500 bg-indigo-50/50 text-indigo-600 animate-pulse"
                       : "border-slate-200 text-slate-400"
                   )}
                 >
-                  <div className="grid place-items-center grid-cols-2">
-                    {captureStep === "topLeft" && captureCountdown !== null ? (
-                      <div className="text-2xl font-bold">
-                        {captureCountdown}
-                      </div>
-                    ) : (
-                      <Focus className="w-5 h-5 opacity-70" />
-                    )}
-                    <span className="text-xs font-bold uppercase">左上角</span>
-                  </div>
+                  {captureStep === "topLeft" && captureCountdown !== null ? (
+                    <div className="text-xl font-bold">{captureCountdown}</div>
+                  ) : (
+                    <Focus className="w-4 h-4 opacity-70" />
+                  )}
+                  <span className="text-[12px] font-bold uppercase">
+                    左上角
+                  </span>
                 </button>
                 <button
-                  disabled={isRunning}
+                  disabled={isRunning || !activeRegionId}
                   onClick={() => startCapture("bottomRight")}
                   className={cn(
-                    "rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-2 transition-all hover:bg-slate-50",
+                    "rounded-xl border-2 border-dashed flex flex-col-2 items-center justify-center gap-3 py-1 transition-all hover:bg-slate-50",
                     captureStep === "bottomRight"
                       ? "border-indigo-500 bg-indigo-50/50 text-indigo-600 animate-pulse"
                       : "border-slate-200 text-slate-400"
                   )}
                 >
-                  <div className="grid place-items-center grid-cols-2 h-8">
-                    {captureStep === "bottomRight" &&
-                    captureCountdown !== null ? (
-                      <div className="text-2xl font-bold">
-                        {captureCountdown}
-                      </div>
-                    ) : (
-                      <Focus className="w-5 h-5 opacity-70" />
-                    )}
-                    <span className="text-xs font-bold uppercase">右下角</span>
-                  </div>
+                  {captureStep === "bottomRight" &&
+                  captureCountdown !== null ? (
+                    <div className="text-xl font-bold">{captureCountdown}</div>
+                  ) : (
+                    <Focus className="w-4 h-4 opacity-70" />
+                  )}
+                  <span className="text-[12px] font-bold uppercase">
+                    右下角
+                  </span>
                 </button>
               </div>
             </div>
           </Card>
 
-          {/* Action Button Area - Massive Button */}
-          <button
-            onClick={toggleTask}
-            className={cn(
-              "rounded-2xl shadow-xl flex flex-col items-center justify-center gap-3 transition-all active:scale-[0.98] group relative overflow-hidden",
-              isRunning
-                ? "bg-white border-2 border-red-100 hover:border-red-200 text-red-500 hover:bg-red-50"
-                : "bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-300/50"
-            )}
-          >
-            {/* Background decorative glow */}
-            {!isRunning && (
-              <div className="absolute inset-0 bg-linear-to-tr from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-            )}
-
-            {isRunning ? (
-              <>
-                <Square className="w-10 h-10 fill-current" />
-                <span className="text-lg font-bold tracking-wide">
-                  停止任务
-                </span>
-              </>
-            ) : (
-              <>
-                <div className="p-4 bg-white/20 rounded-full mb-1 group-hover:scale-110 transition-transform backdrop-blur-sm">
-                  <Play className="w-8 h-8 fill-current ml-1" />
+          {/* Right: KPI + Start Button (1/3, two rows) */}
+          <div className="col-span-3 grid grid-rows-2 gap-3 h-full">
+            <Card className="h-full border-indigo-100 bg-linear-to-br from-white to-indigo-50/50">
+              <div className="flex-1 flex flex-col justify-center items-center">
+                <div className="text-6xl font-black text-indigo-600 tabular-nums tracking-tighter drop-shadow-sm">
+                  {clickCount.toLocaleString()}
                 </div>
-                <span className="text-lg font-bold tracking-wide">
-                  启动引擎
-                </span>
-              </>
-            )}
-          </button>
-        </div>
+                <div className="text-sm font-medium text-slate-400 mt-2">
+                  总点击数
+                </div>
+              </div>
+            </Card>
+
+            <button
+              onClick={toggleTask}
+              className={cn(
+                "h-full w-full rounded-2xl shadow-xl flex flex-col items-center justify-center gap-1 transition-all active:scale-[0.98] group relative overflow-hidden",
+                isRunning
+                  ? "bg-white border-2 border-red-100 hover:border-red-200 text-red-500 hover:bg-red-50"
+                  : "bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-300/50"
+              )}
+            >
+              {/* Background decorative glow */}
+              {!isRunning && (
+                <div className="absolute inset-0 bg-linear-to-tr from-transparent via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+              )}
+
+              {isRunning ? (
+                <>
+                  <Square className="w-10 h-10 fill-current" />
+                  <span className="text-md font-bold tracking-wide">
+                    停止任务
+                  </span>
+                </>
+              ) : (
+                <>
+                  <div className="p-4 bg-white/20 rounded-full group-hover:scale-110 transition-transform backdrop-blur-sm">
+                    <Play className="w-8 h-8 fill-current" />
+                  </div>
+                  <span className="text-md font-bold tracking-wide">
+                    启动引擎
+                  </span>
+                </>
+              )}
+            </button>
+          </div>
+        </section>
 
         {/* Configuration Row */}
-        <Card
-          className="col-span-12 row-span-1 bg-white/60"
-          icon={Zap}
-          title="配置"
-        >
-          <div className="grid grid-cols-[200px_1fr] gap-8 px-2">
+        <Card className="col-span-12 row-span-1 bg-white/60">
+          <div className="grid grid-cols-[266px_1fr] gap-8 px-1">
             {/* Click Interval */}
-            <div className="space-y-4">
-              <div className="flex justify-between items-center px-1">
+            <div className="space-y-2">
+              <div className="flex justify-between items-center px-0">
                 <span className="text-sm font-semibold text-slate-600 flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-slate-400" /> 点击间隔
+                  <Clock className="w-4 h-4 text-slate-400" /> 每轮间隔
                 </span>
                 <span className="text-2xl font-light text-slate-900">
                   {clickInterval}
